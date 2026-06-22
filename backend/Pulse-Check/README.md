@@ -1,156 +1,257 @@
-# Pulse-Check-API ("Watchdog" Sentinel)
+# Pulse-Check API — "Watchdog" Sentinel
 
-This challenge is designed to test your ability to bridge Computer Science fundamentals with Modern Backend Engineering.
+A Dead Man's Switch monitoring service built for **CritMon Servers Inc.**, a critical
+infrastructure monitoring company. Remote devices (solar farms, weather stations) send
+periodic heartbeats to prove they're alive. If a device goes silent for longer than its
+configured timeout, the system automatically flags it as down and fires an alert —
+no human watching logs required.
 
-## 1. Business Context
-
-> **Client:** _CritMon Servers Inc._ (A Critical Infrastructure Monitoring Company).
-
-### The Problem
-
-CritMon provides monitoring for remote solar farms and unmanned weather stations in areas with poor connectivity. These devices are supposed to send "I'm alive" signals every hour.
-
-Currently, CritMon has no way of knowing if a device has gone offline (due to power failure or theft) until a human manually checks the logs. They need a system that alerts _them_ when a device _stops_ talking.
-
-### The Solution
-
-You need to build a **Dead Man’s Switch API**. Devices will register a "monitor" with a countdown timer (e.g., 60 seconds). If the device fails to "ping" (send a heartbeat) to the API before the timer runs out, the system automatically triggers an alert.
+Built with **Java 17** and **Spring Boot 3.3**.
 
 ---
 
-## 2. Technical Objective
+## 1. Architecture Diagram
 
-Build a backend service that manages stateful timers.
+### State flow for a single monitor
 
-- **Registration:** Allow a client to create a monitor with a specific timeout duration.
-- **Heartbeat:** Reset the countdown when a ping is received.
-- **Trigger:** Fire a webhook (or log a critical error) if the countdown reaches zero.
+```
+                 register
+                    │
+                    ▼
+            ┌───────────────┐
+   ┌───────▶│    ACTIVE     │◀───────┐
+   │        └───────┬───────┘        │
+   │   heartbeat     │  timeout      │ heartbeat
+   │  (resets timer) │  elapses      │ (auto un-pauses)
+   │                 ▼               │
+   │        ┌───────────────┐        │
+   └────────│     DOWN      │        │
+            └───────────────┘        │
+                                      │
+            ┌───────────────┐        │
+            │    PAUSED     │────────┘
+            └───────────────┘
+                 ▲
+                 │ pause
+                 │ (from ACTIVE)
+```
 
----
+### Sequence diagram — heartbeat vs. expiry race
 
-## 3. Getting Started
+```
+Device                    API                      Watchdog Sweep (every 1s)
+  │                        │                                │
+  │  POST /monitors        │                                │
+  ├───────────────────────▶│ store Monitor{ACTIVE, t=60s}   │
+  │  201 Created           │                                │
+  │◀───────────────────────┤                                │
+  │                        │                                │
+  │   ... 45s pass ...     │                                │──▶ checks: 45s < 60s, OK
+  │                        │                                │
+  │ POST /heartbeat        │                                │
+  ├───────────────────────▶│ lastHeartbeat = now()          │
+  │  200 OK                │                                │
+  │◀───────────────────────┤                                │
+  │                        │                                │──▶ checks: 0s < 60s, OK
+  │   ... 65s silence ...  │                                │
+  │                        │                                │──▶ checks: 65s ≥ 60s
+  │                        │                                │    → status = DOWN
+  │                        │                                │    → log ALERT
+  │ GET /monitors/{id}     │                                │
+  ├───────────────────────▶│ status: DOWN                   │
+  │◀───────────────────────┤                                │
+```
 
-1.  **Fork this Repository:** Do not clone it directly. Create a fork to your own GitHub account.
-2.  **Environment:** You may use **Node.js, Python, Java or Go, etc.**.
-3.  **Submission:** Your final submission will be a link to your forked repository containing:
-    - The source code.
-    - The **Architecture Diagram**
-    - The `README.md` with documentation.
-
----
-
-## 4. The Architecture Diagram
-
-**Task:** Before you write any code, you must design the logic flow.
-**Deliverable:** A **Sequence Diagram** or **State Flowchart** embedded in your `README.md`.
-
----
-
-## 5. User Stories & Acceptance Criteria
-
-### User Story 1: Registering a Monitor
-
-**As a** device administrator,
-**I want to** create a new monitor for my device,
-**So that** the system knows to track its status.
-
-**Acceptance Criteria:**
-
-- [ ] The API accepts a `POST /monitors` request.
-- [ ] Input: `{"id": "device-123", "timeout": 60, "alert_email": "admin@critmon.com"}`.
-- [ ] The system starts a countdown timer for 60 seconds associated with `device-123`.
-- [ ] Response: `201 Created` with a confirmation message.
-
-### User Story 2: The Heartbeat (Reset)
-
-**As a** remote device,
-**I want to** send a signal to the server,
-**So that** my timer is reset and no alert is sent.
-
-**Acceptance Criteria:**
-
-- [ ] The API accepts a `POST /monitors/{id}/heartbeat` request.
-- [ ] If the ID exists and the timer has NOT expired:
-  - [ ] Restart the countdown from the beginning (e.g., reset to 60 seconds).
-  - [ ] Return `200 OK`.
-- [ ] If the ID does not exist:
-  - [ ] Return `404 Not Found`.
-
-### User Story 3: The Alert (Failure State)
-
-**As a** support engineer,
-**I want to** be notified immediately if a device stops sending heartbeats,
-**So that** I can deploy a repair team.
-
-**Acceptance Criteria:**
-
-- [ ] If the timer for `device-123` reaches 0 seconds (no heartbeat received):
-  - [ ] The system must internally "fire" an alert.
-  - [ ] **Implementation:** For this project, simply `console.log` a JSON object: `{"ALERT": "Device device-123 is down!", "time": <timestamp>}`. (Or simulate sending an email).
-  - [ ] The monitor status changes to `down`.
+**Design note:** instead of spawning one timer thread per device, a single scheduled
+sweep (`@Scheduled(fixedRate = 1000)`) checks every active monitor once per second.
+This keeps the implementation simple and safe — no per-device thread to leak or cancel —
+at the cost of up to ~1 second of detection latency, which is acceptable for this use case.
 
 ---
 
-## 6. Bonus User Story (The "Snooze" Button)
+## 2. Setup Instructions
 
-**As a** maintenance technician,
-**I want to** pause monitoring while I am repairing a device,
-**So that** I don't trigger false alarms.
+### Prerequisites
+- Java 17+
+- Maven 3.8+ (or use the included wrapper if you generate one)
 
-**Acceptance Criteria:**
+### Run locally
 
-- [ ] Create a `POST /monitors/{id}/pause` endpoint.
-- [ ] When called, the timer stops completely. No alerts will fire.
-- [ ] Calling the heartbeat endpoint again automatically "un-pauses" the monitor and restarts the timer.
+```bash
+git clone <your-fork-url>
+cd pulse-check-api
+mvn spring-boot:run
+```
 
----
+The API starts on **http://localhost:8080**.
 
-## 7. The "Developer's Choice" Challenge
+### Run tests
 
-We value engineers who look for "what's missing."
+```bash
+mvn test
+```
 
-**Task:** Identify **one** additional feature that makes this system more robust or user-friendly.
+### Build a jar
 
-1.  **Implement it.**
-2.  **Document it:** Explain _why_ you added it in your README.
-
----
-
-## 8. Documentation Requirements
-
-Your final `README.md` must replace these instructions. It must cover:
-
-1.  **Architecture Diagram**
-2.  **Setup Instructions**
-3.  **API Documentation**
-4.  **The Developer's Choice:** Explanation of your added feature.
+```bash
+mvn clean package
+java -jar target/pulse-check-api-1.0.0.jar
+```
 
 ---
 
-Submit your repo link via the [online](https://forms.cloud.microsoft/e/bLyGT3byxx) form.
+## 3. API Documentation
 
-## 🛑 Pre-Submission Checklist
+All responses are JSON. Timestamps are ISO-8601.
 
-**WARNING:** Before you submit your solution, you **MUST** pass every item on this list.
-If you miss any of these critical steps, your submission will be **automatically rejected** and you will **NOT** be invited to an interview.
+### Register a monitor
 
-### 1. 📂 Repository & Code
+```
+POST /monitors
+Content-Type: application/json
 
-- [ ] **Public Access:** Is your GitHub repository set to **Public**? (We cannot review private repos).
-- [ ] **Clean Code:** Did you remove unnecessary files (like `node_modules`, `.env` with real keys, or `.DS_Store`)?
-- [ ] **Run Check:** if we clone your repo and run `npm start` (or equivalent), does the server start immediately without crashing?
+{
+  "id": "device-123",
+  "timeout": 60,
+  "alert_email": "admin@critmon.com"
+}
+```
 
-### 2. 📄 Documentation (Crucial)
+**201 Created**
+```json
+{
+  "id": "device-123",
+  "status": "ACTIVE",
+  "timeout": 60,
+  "seconds_remaining": 60,
+  "message": "Monitor registered successfully."
+}
+```
 
-- [ ] **Architecture Diagram:** Did you include a visual Diagram (Flowchart or Sequence Diagram) in the README?
-- [ ] **README Swap:** Did you **DELETE** the original instructions (the problem brief) from this file and replace it with your own documentation?
-- [ ] **API Docs:** Is there a clear list of Endpoints and Example Requests in the README?
-
-### 3. 🧹 Git Hygiene
-
-- [ ] **Commit History:** Does your repo have multiple commits with meaningful messages? (A single "Initial Commit" is a red flag).
+**409 Conflict** — if `id` is already registered.
 
 ---
 
-**Ready?**
-If you checked all the boxes above, submit your repository link in the application form. Good luck! 🚀
+### Send a heartbeat
+
+```
+POST /monitors/{id}/heartbeat
+```
+
+**200 OK**
+```json
+{
+  "id": "device-123",
+  "status": "ACTIVE",
+  "timeout": 60,
+  "seconds_remaining": 60,
+  "message": "Heartbeat received. Timer reset."
+}
+```
+
+**404 Not Found** — if `id` does not exist.
+
+> Calling heartbeat on a **paused** monitor automatically un-pauses it and restarts
+> the countdown, as specified in the bonus user story.
+
+---
+
+### Pause a monitor
+
+```
+POST /monitors/{id}/pause
+```
+
+**200 OK**
+```json
+{
+  "id": "device-123",
+  "status": "PAUSED",
+  "timeout": 60,
+  "seconds_remaining": 0,
+  "message": "Monitor paused. No alerts will fire until next heartbeat."
+}
+```
+
+**404 Not Found** — if `id` does not exist.
+
+---
+
+### Get monitor status *(Developer's Choice — see below)*
+
+```
+GET /monitors/{id}
+```
+
+**200 OK**
+```json
+{
+  "id": "device-123",
+  "status": "DOWN",
+  "timeout": 60,
+  "seconds_remaining": 0,
+  "message": "Current monitor status."
+}
+```
+
+**404 Not Found** — if `id` does not exist.
+
+---
+
+### Error format
+
+```json
+{
+  "error": "Monitor not found: device-999",
+  "timestamp": "2026-06-22T20:30:00Z"
+}
+```
+
+---
+
+## 4. Design Decisions
+
+- **Storage — `ConcurrentHashMap<String, Monitor>`:** simplest store that's safe
+  under concurrent register/heartbeat/pause calls from many devices, without pulling
+  in an external database for what is fundamentally in-memory state.
+- **Per-monitor locking, not a global lock:** each `Monitor` is mutated under
+  `synchronized (monitor)`. This means heartbeats from *different* devices never
+  block each other — only operations on the *same* device id serialize, which is
+  the only contention that actually matters here.
+- **Polling sweep over per-device timers:** a single `@Scheduled` task checks all
+  active monitors once a second rather than scheduling a `Timer`/`Future` per
+  device. Far simpler to reason about, with no leaked or hard-to-cancel timer
+  threads, at the cost of ~1s worst-case detection delay.
+- **`volatile` fields on `Monitor`:** `lastHeartbeat` and `status` are read by both
+  the HTTP-handling threads and the scheduled sweep thread; `volatile` guarantees
+  visibility of the latest value across threads without requiring a lock for reads.
+
+---
+
+## 5. The Developer's Choice — On-Demand Status Lookup
+
+**Feature added:** `GET /monitors/{id}` — lets anyone check a device's current
+status, timeout, and seconds remaining at any time.
+
+**Why:** the original spec only surfaces a device going down via a server-side log
+line (`console.log`/`ALERT`). In CritMon's real use case, an operator or a dashboard
+needs to *ask* "is device-123 healthy right now?" without grepping server logs. This
+read-only endpoint makes the monitor's state queryable on demand, which is the
+minimum building block needed for any future status dashboard, polling-based alert
+integration, or health-check page — without changing any of the existing write
+behavior.
+
+---
+
+## 6. Project Structure
+
+```
+src/main/java/com/amalitech/pulsecheck/
+├── PulseCheckApiApplication.java   # entry point, @EnableScheduling
+├── controller/MonitorController   # HTTP endpoints
+├── service/MonitorService         # core watchdog logic + scheduled sweep
+├── model/Monitor                  # domain entity
+├── model/MonitorStatus            # ACTIVE / PAUSED / DOWN
+├── dto/                           # request/response shapes
+└── exception/                     # 404 / 409 / validation handling
+```
