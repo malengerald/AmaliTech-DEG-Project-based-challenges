@@ -7,7 +7,10 @@ configured timeout, the system automatically flags it as down and fires an alert
 no human watching logs required.
 
 Built with **Java 17** and **Spring Boot 3.3**.
+**🔗 Live API:** https://amalitech-deg-project-based-challenges-m5l7.onrender.com
 
+> Note: hosted on Render's free tier, which spins down after inactivity. The first
+> request after idle time may take 30–60 seconds while the instance wakes up.
 ---
 
 ## 1. Architecture Diagram
